@@ -19,6 +19,7 @@ package org.apache.spark.shuffle.alluxio
 import org.apache.spark._
 import org.apache.spark.internal.Logging
 import org.apache.spark.shuffle._
+import org.apache.spark.storage.AlluxioStore
 
 /**
   * Created by weijia.liu
@@ -26,18 +27,25 @@ import org.apache.spark.shuffle._
   * Time :  20:06
   */
 private[spark] class AlluxioShuffleManager(conf : SparkConf) extends ShuffleManager with Logging{
+
+  logInfo("Use alluxio shuffle manager !!!")
+
+  // not used yet
+  private val fileShuffleBlockManager = new AlluxioShuffleBlockResolver(conf)
+  private val shuffleSerializer = new AlluxioSparkShuffleSerializer()
+  private val shuffleSorter = new AlluxioSparkShuffleSorter()
+
   /**
     * Register a shuffle with the manager and obtain a handle for it to pass to tasks.
     */
   override def registerShuffle[K, V, C](shuffleId: Int, numMaps: Int, dependency: ShuffleDependency[K, V, C]): ShuffleHandle = {
-    // TODO create directories according to partions
+    AlluxioStore.get.registerShuffle(shuffleId, numMaps, dependency.partitioner.numPartitions)
     new BaseShuffleHandle[K, V, C](shuffleId, numMaps, dependency)
   }
 
   /** Get a writer for a given partition. Called on executors by map tasks. */
   override def getWriter[K, V](handle: ShuffleHandle, mapId: Int, context: TaskContext): ShuffleWriter[K, V] = {
-    // TODO construct an AlluxioShuffleWriter
-    null
+    new AlluxioShuffleWriter[K, V](shuffleBlockResolver, handle.asInstanceOf[BaseShuffleHandle[K, V, _]], mapId, context, shuffleSerializer)
   }
 
   /**
@@ -45,8 +53,8 @@ private[spark] class AlluxioShuffleManager(conf : SparkConf) extends ShuffleMana
     * Called on executors by reduce tasks.
     */
   override def getReader[K, C](handle: ShuffleHandle, startPartition: Int, endPartition: Int, context: TaskContext): ShuffleReader[K, C] = {
-    // TODO construct an AlluxioShuffleReader
-    null
+    new AlluxioShuffleReader[K, C](handle.asInstanceOf[BaseShuffleHandle[K, _, C]],
+      startPartition, endPartition, context, shuffleSerializer, shuffleSorter)
   }
 
   /**
@@ -55,19 +63,19 @@ private[spark] class AlluxioShuffleManager(conf : SparkConf) extends ShuffleMana
     * @return true if the metadata removed successfully, otherwise false.
     */
   override def unregisterShuffle(shuffleId: Int): Boolean = {
-    // TODO delete directories according to shuffleId
-    null
+    AlluxioStore.get.unregisterShuffle(shuffleId)
+    true
   }
 
   /**
     * Return a resolver capable of retrieving shuffle block data based on block coordinates.
     */
-  override def shuffleBlockResolver: ShuffleBlockResolver = {
-    null
+  override def shuffleBlockResolver: AlluxioShuffleBlockResolver = {
+    fileShuffleBlockManager
   }
 
   /** Shut down this ShuffleManager. */
   override def stop(): Unit = {
-    // TODO stop and cleanup
+    AlluxioStore.put()
   }
 }
