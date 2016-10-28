@@ -14,7 +14,7 @@ import scala.reflect.ClassTag
   * Time :  10:55
   */
 class AlluxioSparkShuffleSerializer extends AlluxioShuffleSerializer {
-  override def newAlluxioSerializer[K, V](dep: ShuffleDependency[K, V, _]): AlluxioSerializerInstance = {
+  override def newAlluxioSerializer[K, V](dep: ShuffleDependency[K, _, V]): AlluxioSerializerInstance = {
     new AlluxioSparkShuffleSerializerInstance(dep.serializer.newInstance())
   }
 }

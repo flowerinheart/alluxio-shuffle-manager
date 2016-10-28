@@ -1,6 +1,8 @@
 
 package org.apache.spark.shuffle.alluxio
 
+import java.util
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.shuffle.{BaseShuffleHandle, ShuffleWriter}
@@ -28,8 +30,9 @@ private[spark] class AlluxioShuffleWriter[K, V](
   // we don't try deleting files, etc twice.
   private var stopping = false
   private val writeMetrics = context.taskMetrics().shuffleWriteMetrics
-  private val serialzerInstance = alluxioSerializer.newAlluxioSerializer(dep)
-  private val writerGroup = AlluxioStore.get.getWriterGroup(dep.shuffleId, dep.partitioner.numPartitions, serialzerInstance, writeMetrics)
+  //private val serialzerInstance = alluxioSerializer.newAlluxioSerializer(dep)
+  private val writerGroup = AlluxioStore.get.getWriterGroup(dep.shuffleId, dep.partitioner.numPartitions, dep.serializer.newInstance(), writeMetrics)
+  private val recordsCache: util.HashMap[Int, util.List[Product2[K, Any]]] = new util.HashMap[Int, util.List[Product2[K, Any]]](dep.partitioner.numPartitions)
 
   /** Write a sequence of records to this task's output */
   override def write(records: Iterator[Product2[K, V]]): Unit = {
@@ -47,10 +50,37 @@ private[spark] class AlluxioShuffleWriter[K, V](
       records
     }
 
-    for (elem <- iter) {
-      // TODO reduce call getPartition method
+    while (iter.hasNext) {
+      val elem = iter.next()
       val partitionId = dep.partitioner.getPartition(elem._1)
-      writerGroup.getWriters(partitionId).write(elem._1, elem._2)
+      var list = recordsCache.get(partitionId)
+      if (list != null) {
+        list.add(elem)
+      } else {
+        list = new util.ArrayList[Product2[K, Any]](){{add(elem)}}
+        recordsCache.put(partitionId, list)
+      }
+
+      if (list.size()%10000 == 0) {
+        batchWrite(list, partitionId)
+      }
+    }
+
+    val mapIter = recordsCache.entrySet().iterator()
+    while (mapIter.hasNext) {
+      val entry = mapIter.next()
+      batchWrite(entry.getValue, entry.getKey)
+    }
+  }
+
+  private def batchWrite(list: util.List[Product2[K, Any]], partitionId: Int): Unit = {
+    AlluxioShuffleWriter.lock.synchronized {
+      val listIter = list.iterator()
+      while (listIter.hasNext) {
+        val elem = listIter.next()
+        writerGroup.getWriters(partitionId).write(elem._1, elem._2.asInstanceOf[V])
+      }
+      list.clear()
     }
   }
 
@@ -60,12 +90,15 @@ private[spark] class AlluxioShuffleWriter[K, V](
       logInfo("begin to stop writers")
       stopping = true
       if (success) {
-        logInfo("success is true, begin to call writers' flush and release")
-        writerGroup.flush()
+        logInfo("success is true, begin to call writers' release")
         val sizes: Array[Long] = writerGroup.release()
         return Some(MapStatus(blockManager.shuffleServerId, sizes))
       }
     }
     None
   }
+}
+
+object AlluxioShuffleWriter {
+  val lock = new Object
 }

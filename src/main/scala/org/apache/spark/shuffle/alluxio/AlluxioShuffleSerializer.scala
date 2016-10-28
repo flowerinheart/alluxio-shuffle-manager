@@ -14,7 +14,7 @@ import org.apache.spark.serializer.{DeserializationStream, SerializationStream}
   * Time :  10:36
   */
 trait AlluxioShuffleSerializer {
-  def newAlluxioSerializer[K, V](dep: ShuffleDependency[K, V, _]): AlluxioSerializerInstance
+  def newAlluxioSerializer[K, V](dep: ShuffleDependency[K, _, V]): AlluxioSerializerInstance
 }
 
 trait AlluxioSerializerInstance {

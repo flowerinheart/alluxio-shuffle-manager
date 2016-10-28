@@ -28,16 +28,19 @@ private[spark] class AlluxioShuffleReader[K, C](
 
 
   private val dep = handle.dependency
-  private val serializerInstance = alluxioSerializer.newAlluxioSerializer(dep)
+  //private val serializerInstance = alluxioSerializer.newAlluxioSerializer(dep)
 
   override def read(): Iterator[Product2[K, C]] = {
     val streams = AlluxioStore.get.getFileInStreams(dep.shuffleId, startPartition, endPartition)
+    val serializerInstance = dep.serializer.newInstance()
     // Create a key/value iterator for each stream
     val recordIter = streams.iterator.flatMap {stream =>
       // Note: the asKeyValueIterator below wraps a key/value iterator inside of a
       // NextIterator. The NextIterator makes sure that close() is called on the
       // underlying InputStream when all records have been read.
-      serializerInstance.deserializeAlluxioStream(stream).asKeyValueIterator
+
+      //serializerInstance.deserializeAlluxioStream(stream).asKeyValueIterator
+      serializerInstance.deserializeStream(stream).asKeyValueIterator
     }
 
     // Update the context task metrics for each record read.
