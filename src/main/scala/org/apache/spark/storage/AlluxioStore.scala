@@ -12,7 +12,6 @@ import alluxio.{AlluxioURI, Configuration, PropertyKey}
 import org.apache.spark.executor.ShuffleWriteMetrics
 import org.apache.spark.internal.Logging
 import org.apache.spark.serializer.{SerializationStream, Serializer, SerializerInstance}
-import org.apache.spark.shuffle.alluxio.AlluxioSerializerInstance
 import org.apache.spark.{SparkConf, SparkEnv}
 
 import scala.collection.mutable.ArrayBuffer
