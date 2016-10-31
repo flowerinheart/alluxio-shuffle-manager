@@ -142,7 +142,7 @@ class AlluxioStore extends Logging {
           for (i <- 0 until numPartitions) {
             val sb: StringBuilder = new StringBuilder()
             sb.append(shuffleDir).append("/").append(appId).append("/shuffle_").append(shuffleId).append("/part_").append(i)
-              .append("/").append(executorId).append("/").append(hostname)
+              .append("/").append(executorId).append("_").append(hostname)
             val options: CreateFileOptions = CreateFileOptions.defaults()
               .setWriteType(if (alluxioMemOnly) WriteType.MUST_CACHE else WriteType.CACHE_THROUGH)
               .setBlockSizeBytes(alluxioBlockSize).setRecursive(true)
@@ -165,8 +165,7 @@ class AlluxioStore extends Logging {
     for (i <- startPrtId until endPartId) {
       // to make sure thread safe, every executor only read the files which id equals its executor id
       val sb: StringBuilder = new StringBuilder()
-      sb.append(shuffleDir).append("/").append(appId).append("/shuffle_").append(shuffleId).append("/part_").append(i)
-        .append("/").append(executorId).appendAll("/")
+      sb.append(shuffleDir).append("/").append(appId).append("/shuffle_").append(shuffleId).append("/part_").append(i).append("/")
       val fileStatus = fs.listStatus(new AlluxioURI(sb.toString()))
       val iter = fileStatus.iterator()
       while (iter.hasNext) {
