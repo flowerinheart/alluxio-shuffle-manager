@@ -37,7 +37,7 @@ RDD中的一个partition
 Alluxio中的文件，其中文件全路径命名如：/spark/shuffle/${**appId**}/shuffle_${**shuffleId**}/part_${**partitionId**}/${**executorId**}/${**hostName**}，文件内容则为经过序列化后的KVKV...这样的格式。
 
 其中输入RDD partition以及ShuffleMapTask和ShuffleWriter、以及输出Alluxio文件等的结构关系图如下所示：
-![image](G:\Documents\SkyData\SkyDiscovery\AlluxioShuffleManager\ShuffleWriter.jpg)  
+![image](./resources/ShuffleWriter.jpg)  
 
 **在上图中：**
 * 每个ShuffleMapTask仅处理RDD中一个partition的数据；
