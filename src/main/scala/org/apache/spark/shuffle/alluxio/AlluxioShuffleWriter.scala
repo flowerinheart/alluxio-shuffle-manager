@@ -1,15 +1,11 @@
 
 package org.apache.spark.shuffle.alluxio
 
-import java.util
-
 import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.shuffle.{BaseShuffleHandle, ShuffleWriter}
 import org.apache.spark.storage.AlluxioStore
 import org.apache.spark.{SparkEnv, TaskContext}
-
-import scala.collection.mutable
 
 
 /**
@@ -21,8 +17,7 @@ private[spark] class AlluxioShuffleWriter[K, V](
                                                  shuffleBlockManager: AlluxioShuffleBlockResolver,
                                                  handle: BaseShuffleHandle[K, V, _],
                                                  mapId: Int,
-                                                 context: TaskContext,
-                                                 alluxioSerializer: AlluxioShuffleSerializer)
+                                                 context: TaskContext)
   extends ShuffleWriter[K, V] with Logging{
 
   private val dep = handle.dependency
@@ -33,9 +28,7 @@ private[spark] class AlluxioShuffleWriter[K, V](
   // we don't try deleting files, etc twice.
   private var stopping = false
   private val writeMetrics = context.taskMetrics().shuffleWriteMetrics
-  //private val serialzerInstance = alluxioSerializer.newAlluxioSerializer(dep)
   private val writerGroup = AlluxioStore.get.getWriterGroup(dep.shuffleId, dep.partitioner.numPartitions, dep.serializer.newInstance(), writeMetrics)
-  private val recordsCache = new mutable.HashMap[Int, java.util.List[Product2[Any, Any]]]
 
   /** Write a sequence of records to this task's output */
   override def write(records: Iterator[Product2[K, V]]): Unit = {
@@ -54,19 +47,7 @@ private[spark] class AlluxioShuffleWriter[K, V](
     }
 
     for (elem <- iter) {
-      val partitionId = dep.partitioner.getPartition(elem._1)
-      var list = recordsCache.getOrElse(partitionId, null)
-      if (list != null) {
-        list.add(elem)
-      } else {
-        list = new util.ArrayList[Product2[Any, Any]](){{add(elem)}}
-        recordsCache.put(partitionId, list)
-      }
-    }
-
-    for (elem <- recordsCache) {
-      writerGroup.getWriters(elem._1).batchWrite(elem._2)
-      elem._2.clear()
+      writerGroup.getWriters(dep.partitioner.getPartition(elem._1)).write(elem._1, elem._2)
     }
   }
 

@@ -19,16 +19,12 @@ private[spark] class AlluxioShuffleReader[K, C](
   startPartition: Int,
   endPartition: Int,
   context: TaskContext,
-  alluxioSerializer: AlluxioShuffleSerializer,
-  alluxioShuffleSorter: AlluxioShuffleSorter,
   serializerManager: SerializerManager = SparkEnv.get.serializerManager,
   blockManager: BlockManager = SparkEnv.get.blockManager,
   mapOutputTracker: MapOutputTracker = SparkEnv.get.mapOutputTracker)
   extends ShuffleReader[K, C] with Logging{
 
-
   private val dep = handle.dependency
-  //private val serializerInstance = alluxioSerializer.newAlluxioSerializer(dep)
 
   override def read(): Iterator[Product2[K, C]] = {
     val streams = AlluxioStore.get.getFileInStreams(dep.shuffleId, startPartition, endPartition)
@@ -86,6 +82,5 @@ private[spark] class AlluxioShuffleReader[K, C](
       case None =>
         aggregatedIter
     }
-
   }
 }

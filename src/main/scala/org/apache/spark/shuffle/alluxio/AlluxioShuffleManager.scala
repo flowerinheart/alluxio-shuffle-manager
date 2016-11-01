@@ -32,8 +32,6 @@ private[spark] class AlluxioShuffleManager(conf : SparkConf) extends ShuffleMana
 
   // not used yet
   private val fileShuffleBlockManager = new AlluxioShuffleBlockResolver(conf)
-  private val shuffleSerializer = new AlluxioSparkShuffleSerializer()
-  private val shuffleSorter = new AlluxioSparkShuffleSorter()
 
   /**
     * Register a shuffle with the manager and obtain a handle for it to pass to tasks.
@@ -45,7 +43,7 @@ private[spark] class AlluxioShuffleManager(conf : SparkConf) extends ShuffleMana
 
   /** Get a writer for a given partition. Called on executors by map tasks. */
   override def getWriter[K, V](handle: ShuffleHandle, mapId: Int, context: TaskContext): ShuffleWriter[K, V] = {
-    new AlluxioShuffleWriter[K, V](shuffleBlockResolver, handle.asInstanceOf[BaseShuffleHandle[K, V, _]], mapId, context, shuffleSerializer)
+    new AlluxioShuffleWriter[K, V](shuffleBlockResolver, handle.asInstanceOf[BaseShuffleHandle[K, V, _]], mapId, context)
   }
 
   /**
@@ -54,8 +52,7 @@ private[spark] class AlluxioShuffleManager(conf : SparkConf) extends ShuffleMana
     */
   override def getReader[K, C](handle: ShuffleHandle, startPartition: Int, endPartition: Int, context: TaskContext): ShuffleReader[K, C] = {
     AlluxioStore.get.releaseShuffleWriterGroup(handle.shuffleId)
-    new AlluxioShuffleReader[K, C](handle.asInstanceOf[BaseShuffleHandle[K, _, C]],
-      startPartition, endPartition, context, shuffleSerializer, shuffleSorter)
+    new AlluxioShuffleReader[K, C](handle.asInstanceOf[BaseShuffleHandle[K, _, C]], startPartition, endPartition, context)
   }
 
   /**

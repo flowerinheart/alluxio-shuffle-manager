@@ -339,27 +339,20 @@ private[spark] class AlluxioObjectWriter(directStream: FileOutStream, serializer
     ts.write(b, off, len)
   }
 
-  def batchWrite(list: java.util.List[Product2[Any, Any]]): Unit = {
-    lock.synchronized {
-      for (i <- 0 until list.size()) {
-        write(list.get(i)._1, list.get(i)._2)
-      }
-    }
-  }
-
   /**
     * write record's key and value with the serialized stream and write record num simultaneously
     * @param key record's key
     * @param value record's value
     */
   def write(key: Any, value: Any): Unit = {
-    if (!initialized) {
-      open()
-    }
+    lock.synchronized {
+      if (!initialized) {
+        open()
+      }
 
-    // TODO underlying stream should support append write
-    directObjOut.writeKey(key)
-    directObjOut.writeValue(value)
+      directObjOut.writeKey(key)
+      directObjOut.writeValue(value)
+    }
     recordWritten()
   }
 
