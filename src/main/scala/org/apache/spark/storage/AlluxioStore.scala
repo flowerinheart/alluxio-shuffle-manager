@@ -397,9 +397,9 @@ private[spark] class AlluxioObjectWriter(directStream: FileOutStream, serializer
 
 class AlluxioShuffleWriterGroup(val streams: Array[FileOutStream], shuffleId: Int,
                                 serializerInstance: SerializerInstance,
-                                writeMetrics: ShuffleWriteMetrics) extends Logging{
+                                writeMetrics: ShuffleWriteMetrics,
+                                @volatile var isReleased: Boolean = false) extends Logging{
   private val writers: Array[AlluxioObjectWriter] = new Array[AlluxioObjectWriter](streams.length)
-  private var isReleased: Boolean = false
   private val releaseLock = new Object()
 
   logInfo(s"shuffle id is : $shuffleId, writer num is : " + writers.length)

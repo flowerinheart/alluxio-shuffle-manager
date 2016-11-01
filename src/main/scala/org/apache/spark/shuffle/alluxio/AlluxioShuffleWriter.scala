@@ -37,8 +37,6 @@ private[spark] class AlluxioShuffleWriter[K, V](
   private val writerGroup = AlluxioStore.get.getWriterGroup(dep.shuffleId, dep.partitioner.numPartitions, dep.serializer.newInstance(), writeMetrics)
   private val recordsCache = new mutable.HashMap[Int, java.util.List[Product2[Any, Any]]]
 
-  private var sum: Long = 0
-
   /** Write a sequence of records to this task's output */
   override def write(records: Iterator[Product2[K, V]]): Unit = {
     val iter = if (dep.aggregator.isDefined) {
@@ -55,7 +53,6 @@ private[spark] class AlluxioShuffleWriter[K, V](
       records
     }
 
-    val start = System.nanoTime()
     for (elem <- iter) {
       val partitionId = dep.partitioner.getPartition(elem._1)
       var list = recordsCache.getOrElse(partitionId, null)
@@ -65,31 +62,17 @@ private[spark] class AlluxioShuffleWriter[K, V](
         list = new util.ArrayList[Product2[Any, Any]](){{add(elem)}}
         recordsCache.put(partitionId, list)
       }
-
-//      if (list.size()%10000 == 0) {
-//        batchWrite(list, partitionId)
-//      }
     }
 
     for (elem <- recordsCache) {
-      batchWrite(elem._2, elem._1)
+      writerGroup.getWriters(elem._1).batchWrite(elem._2)
+      elem._2.clear()
     }
-    val end = System.nanoTime()
-    sum += (end - start)
-  }
-
-  private def batchWrite(list: java.util.List[Product2[Any, Any]], partitionId: Int): Unit = {
-    if (!list.isEmpty) {
-      writerGroup.getWriters(partitionId).batchWrite(list)
-    }
-    list.clear()
   }
 
   /** Close this writer, passing along whether the map completed */
   override def stop(success: Boolean): Option[MapStatus] = {
     if (!stopping) {
-      sum /= 1000000
-      logInfo(s"### write data total spent $sum ms ###")
       stopping = true
       if (success) {
         val sizes: Array[Long] = writerGroup.lengths()
