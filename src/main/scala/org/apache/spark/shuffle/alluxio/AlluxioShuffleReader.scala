@@ -1,12 +1,12 @@
 package org.apache.spark.shuffle.alluxio
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.{InterruptibleIterator, MapOutputTracker, SparkEnv, TaskContext}
 import org.apache.spark.serializer.SerializerManager
 import org.apache.spark.shuffle.{BaseShuffleHandle, ShuffleReader}
 import org.apache.spark.storage.{AlluxioStore, BlockManager}
 import org.apache.spark.util.CompletionIterator
 import org.apache.spark.util.collection.ExternalSorter
+import org.apache.spark.{InterruptibleIterator, MapOutputTracker, SparkEnv, TaskContext}
 
 
 /**
@@ -31,6 +31,7 @@ private[spark] class AlluxioShuffleReader[K, C](
   //private val serializerInstance = alluxioSerializer.newAlluxioSerializer(dep)
 
   override def read(): Iterator[Product2[K, C]] = {
+    val start = System.nanoTime()
     val streams = AlluxioStore.get.getFileInStreams(dep.shuffleId, startPartition, endPartition)
     val serializerInstance = dep.serializer.newInstance()
     // Create a key/value iterator for each stream
@@ -82,9 +83,16 @@ private[spark] class AlluxioShuffleReader[K, C](
         context.taskMetrics().incMemoryBytesSpilled(sorter.memoryBytesSpilled)
         context.taskMetrics().incDiskBytesSpilled(sorter.diskBytesSpilled)
         context.taskMetrics().incPeakExecutionMemory(sorter.peakMemoryUsedBytes)
+        val end = System.nanoTime()
+        val sum = (end - start)/1000000
+        logInfo(s"### read data total spent $sum ms ###")
         CompletionIterator[Product2[K, C], Iterator[Product2[K, C]]](sorter.iterator, sorter.stop())
       case None =>
+        val end = System.nanoTime()
+        val sum = (end - start)/1000000
+        logInfo(s"### read data total spent $sum ms ###")
         aggregatedIter
     }
+
   }
 }
