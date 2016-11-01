@@ -374,7 +374,7 @@ private[spark] class AlluxioObjectWriter(directStream: FileOutStream, serializer
 
     if (numRecordsWritten % 16384 == 0) {
       updateBytesWritten()
-      flush()
+      //flush()
     }
   }
 
