@@ -58,6 +58,22 @@ Alluxio上一个partition目录下的所有Executor创建的文件
 ![image](resources/ShuffleReader.jpg)
 
 
+## 配置  
+
+AlluxioShuffleManager提供了如下配置项供选择：
+
+    spark.alluxio.block.size  			生成的Alluxio文件的block size，默认是536870912（512MB），
+    spark.alluxio.memory.only  			Alluxio生成文件时是否只使用内存进行存储，不进行异步落磁盘，默认为true
+    spark.alluxio.read.without.cache	当读取Alluxio文件时是否不将远端的数据缓存到本地，默认为true
+    spark.alluxio.master.host			Alluxio Master的地址，格式如alluxio://10.0.2.21:19998，目前AlluxioShuffleManager仅支持Alluxio StandAlone模式的Master地址配置
+
+还有使用AlluxioShuffleManager必须要配置的一项为：  
+
+    spark.shuffle.manager 				设置值为org.apache.spark.shuffle.alluxio.AlluxioShuffleManager
+
+*注意：在使用AlluxioShuffleManager时会需要一些依赖的jar包如alluxio-core-client-1.3.0.jar、alluxio-core-common-1.3.0.jar以及alluxio-underfs-hdfs-1.3.0.jar或者alluxio-underfs-local-1.3.0.jar等，同时还包括alluxio-shuffle-manager-1.0-SNAPSHOT.jar。可以在对外发布时将上述包全部打到spark的jars目录下即可。*
+
+
 ## 存在问题
 
 * **扩展带来的问题**  
