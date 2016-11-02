@@ -14,6 +14,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.serializer.{SerializationStream, Serializer, SerializerInstance}
 import org.apache.spark.{SparkConf, SparkEnv}
 
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
 /**
@@ -39,7 +40,7 @@ class AlluxioStore extends Logging {
   var alluxioReadWithoutCache: Boolean = false
 
   // key : shuffleId, value : fileId
-  var shuffleWriterGroups: java.util.HashMap[Integer, AlluxioShuffleWriterGroup] = new java.util.HashMap[Integer, AlluxioShuffleWriterGroup]
+  val shuffleWriterGroups = new mutable.HashMap[Int, AlluxioShuffleWriterGroup]
   val unregLock = new Object()
   val getWritersLock = new Object()
 
@@ -130,7 +131,7 @@ class AlluxioStore extends Logging {
       if (shuffleId > 0 && shuffleExists(shuffleId)) {
         // when shuffle id is exist, delete shuffle id dir from alluxio
         deleteAlluxioFiles(shuffleId)
-        shuffleWriterGroups.remove(shuffleId)
+        shuffleWriterGroups -= shuffleId
       }
     } catch {
       case e: Exception => logInfo(s"failed to unregister shuffle, shuffle id is $shuffleId")
@@ -142,10 +143,9 @@ class AlluxioStore extends Logging {
     * direct delete the application directory from Alluxio
     */
   def releaseAllShuffleData(): Unit = {
-    val iter = shuffleWriterGroups.entrySet().iterator()
-    while (iter.hasNext) {
-      deleteAlluxioFiles(iter.next().getKey)
-      iter.remove()
+    for (key <- shuffleWriterGroups.keySet) {
+      deleteAlluxioFiles(key)
+      shuffleWriterGroups -= key
     }
     fs.delete(new AlluxioURI(shuffleDir + "/" + appId), DeleteOptions.defaults().setRecursive(true))
   }
@@ -155,7 +155,7 @@ class AlluxioStore extends Logging {
     * @param shuffleId shuffle id
     */
   def releaseShuffleWriterGroup(shuffleId: Int): Unit = {
-    shuffleWriterGroups.get(shuffleId).release()
+    shuffleWriterGroups(shuffleId).release()
   }
 
   /**
@@ -185,9 +185,9 @@ class AlluxioStore extends Logging {
   def getWriterGroup(shuffleId: Int, numPartitions: Int,
                      serializerInstance: SerializerInstance,
                      writeMetrics: ShuffleWriteMetrics): AlluxioShuffleWriterGroup = {
-    if (!shuffleWriterGroups.containsKey(shuffleId)) {
+    if (!shuffleWriterGroups.contains(shuffleId)) {
       getWritersLock.synchronized {
-        if (!shuffleWriterGroups.containsKey(shuffleId)) {
+        if (!shuffleWriterGroups.contains(shuffleId)) {
           // every shuffle dependency corresponds to one writer group, and one writer corresponds to one partition
           val streams = new Array[FileOutStream](numPartitions)
           for (i <- 0 until numPartitions) {
@@ -204,7 +204,7 @@ class AlluxioStore extends Logging {
       }
     }
 
-    shuffleWriterGroups.get(shuffleId)
+    shuffleWriterGroups(shuffleId)
   }
 
   /**
@@ -259,7 +259,7 @@ class AlluxioStore extends Logging {
   }
 
   private def shuffleExists(shuffleId: Int): Boolean = {
-    shuffleWriterGroups.containsKey(shuffleId)
+    shuffleWriterGroups.contains(shuffleId)
   }
 }
 
