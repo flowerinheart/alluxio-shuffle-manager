@@ -43,6 +43,9 @@ class AlluxioStore extends Logging {
   val unregLock = new Object()
   val getWritersLock = new Object()
 
+  /**
+    * init AlluxioStore
+    */
   def init(): Unit = {
     logInfo("begin to init Alluxio Store.")
 
@@ -85,6 +88,9 @@ class AlluxioStore extends Logging {
     logInfo("init Alluxio Store over.")
   }
 
+  /**
+    * shutdown AlluxioStore
+    */
   def shutdown(): Unit = {
     logInfo("begin to shutdown Alluxio Store.")
     // FileSystem client has not shutdown or close or stop method
@@ -92,6 +98,12 @@ class AlluxioStore extends Logging {
     logInfo("shutdown Alluxio Store over.")
   }
 
+  /**
+    * register shuffle and create directories on Alluxio
+    * @param shuffleId shuffle id
+    * @param numMaps number of maps
+    * @param partitions rdd partition nums
+    */
   def registerShuffle(shuffleId: Int, numMaps: Int, partitions: Int): Unit = {
     logInfo(s"begin to register shuffle, shuffle id is $shuffleId .")
     if (shuffleExists(shuffleId)) {
@@ -108,6 +120,10 @@ class AlluxioStore extends Logging {
     }
   }
 
+  /**
+    * unregister shuffle and delete directories from Alluxio
+    * @param shuffleId shuffle id
+    */
   def unregisterShuffle(shuffleId: Int): Unit = {
     logInfo(s"begin to unregister shuffle, shuffle id is $shuffleId")
     try {
@@ -122,6 +138,9 @@ class AlluxioStore extends Logging {
     logInfo(s"unregister shuffle over, shuffle id is $shuffleId")
   }
 
+  /**
+    * direct delete the application directory from Alluxio
+    */
   def releaseAllShuffleData(): Unit = {
     val iter = shuffleWriterGroups.entrySet().iterator()
     while (iter.hasNext) {
@@ -131,10 +150,18 @@ class AlluxioStore extends Logging {
     fs.delete(new AlluxioURI(shuffleDir + "/" + appId), DeleteOptions.defaults().setRecursive(true))
   }
 
+  /**
+    * release the shuffle writer group
+    * @param shuffleId shuffle id
+    */
   def releaseShuffleWriterGroup(shuffleId: Int): Unit = {
     shuffleWriterGroups.get(shuffleId).release()
   }
 
+  /**
+    * delete the shuffle directory
+    * @param shuffleId shuffle id
+    */
   private def deleteAlluxioFiles(shuffleId: Int): Unit = {
     val options: DeleteOptions = DeleteOptions.defaults().setRecursive(true)
     val shuffleIdDir = new AlluxioURI(shuffleDir + "/" + appId + "/shuffle_" + shuffleId)
@@ -147,6 +174,14 @@ class AlluxioStore extends Logging {
     logInfo(s"delete $shuffleIdDir successfully from Alluxio.")
   }
 
+  /**
+    * get shuffle writer group, this method would create files on Alluxio and get FileOutStreams
+    * @param shuffleId shuffle id
+    * @param numPartitions number of partitions
+    * @param serializerInstance serializer instance, serialize record's key and value
+    * @param writeMetrics shuffle write metrics, statistic records number have been written
+    * @return return an AlluxioShuffleWriterGroup object
+    */
   def getWriterGroup(shuffleId: Int, numPartitions: Int,
                      serializerInstance: SerializerInstance,
                      writeMetrics: ShuffleWriteMetrics): AlluxioShuffleWriterGroup = {
@@ -172,6 +207,13 @@ class AlluxioStore extends Logging {
     shuffleWriterGroups.get(shuffleId)
   }
 
+  /**
+    * open files and return FileInStreams on Alluxio
+    * @param shuffleId shuffle id
+    * @param startPrtId start partition id
+    * @param endPartId end partition id
+    * @return an array of FileInStream
+    */
   def getFileInStreams(shuffleId: Int, startPrtId: Int, endPartId: Int): Array[FileInStream] = {
     logInfo(s"start partition is $startPrtId, end partition is $endPartId")
     val options = OpenFileOptions.defaults().setReadType(if (alluxioReadWithoutCache) ReadType.NO_CACHE else ReadType.CACHE_PROMOTE)
@@ -194,6 +236,12 @@ class AlluxioStore extends Logging {
     streams.toArray
   }
 
+  /**
+    * check whether the file is closed by judging the length of the file
+    * @param length the file length
+    * @param fileUri Alluxio uri
+    * @return return true if the file is closed, otherwise false
+    */
   private def checkFileStatus(length: Long, fileUri: AlluxioURI): Boolean = {
     if (length == 0) {
       for (i <- 0 to 5) {
@@ -280,7 +328,6 @@ private[spark] class AlluxioObjectWriter(directStream: FileOutStream, serializer
   private var ts: TimeTrackingOutputStream = _
   private var finalPosition: Long = -1
   private var reportedPosition: Long = 0
-
   private val lock = new Object()
 
   /**
@@ -323,6 +370,8 @@ private[spark] class AlluxioObjectWriter(directStream: FileOutStream, serializer
 
   def isOpen: Boolean = initialized
 
+  def length : Long = directStream.getBytesWritten
+
   override def write(b: Int): Unit = throw new UnsupportedOperationException()
 
   /**
@@ -355,8 +404,6 @@ private[spark] class AlluxioObjectWriter(directStream: FileOutStream, serializer
     }
     recordWritten()
   }
-
-  def length : Long = directStream.getBytesWritten
 
   /**
     * Notify the writer that a record worth of bytes has been written with OutputStream#write.
