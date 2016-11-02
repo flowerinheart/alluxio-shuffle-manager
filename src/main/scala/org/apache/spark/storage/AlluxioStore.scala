@@ -51,8 +51,8 @@ class AlluxioStore extends Logging {
 
     // init alluxio filesystem client
     alluxioBlockSize = sparkConf.getLong("spark.alluxio.block.size", 536870912)
-    alluxioMemOnly = sparkConf.getBoolean("spark.alluxio.memory.only", defaultValue = false)
-    alluxioReadWithoutCache = sparkConf.getBoolean("spark.alluxio.read.without.cache", defaultValue = false)
+    alluxioMemOnly = sparkConf.getBoolean("spark.alluxio.memory.only", defaultValue = true)
+    alluxioReadWithoutCache = sparkConf.getBoolean("spark.alluxio.read.without.cache", defaultValue = true)
     val alluxioMasterHost = sparkConf.get("spark.alluxio.master.host")
     if (alluxioMasterHost == null) {
       throw new Exception("get spark.alluxio.master.host return null")
