@@ -3,7 +3,7 @@ package org.apache.spark.shuffle.alluxio
 import org.apache.spark.internal.Logging
 import org.apache.spark.serializer.SerializerManager
 import org.apache.spark.shuffle.{BaseShuffleHandle, ShuffleReader}
-import org.apache.spark.storage.{AlluxioStore, BlockManager}
+import org.apache.spark.storage.{AlluxioFileFetcherIterator, AlluxioStore, BlockManager}
 import org.apache.spark.util.CompletionIterator
 import org.apache.spark.util.collection.ExternalSorter
 import org.apache.spark.{InterruptibleIterator, MapOutputTracker, SparkEnv, TaskContext}
@@ -29,9 +29,10 @@ private[spark] class AlluxioShuffleReader[K, C](
   override def read(): Iterator[Product2[K, C]] = {
     // TODO (Only one task) loads all index file on Alluxio and reads from PartitionFileInStream
     val streams = AlluxioStore.get.getFileInStreams(dep.shuffleId, startPartition, endPartition)
+    val iter = new AlluxioFileFetcherIterator(streams)
     val serializerInstance = dep.serializer.newInstance()
     // Create a key/value iterator for each stream
-    val recordIter = streams.iterator.flatMap {stream =>
+    val recordIter = iter.flatMap {stream =>
       // Note: the asKeyValueIterator below wraps a key/value iterator inside of a
       // NextIterator. The NextIterator makes sure that close() is called on the
       // underlying InputStream when all records have been read.

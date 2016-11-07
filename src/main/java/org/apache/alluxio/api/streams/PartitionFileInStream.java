@@ -82,4 +82,18 @@ public class PartitionFileInStream extends InputStream{
             inStream.close();
         }
     }
+
+    public long getLength() {
+        return length;
+    }
+
+    @Override
+    public String toString() {
+        return "PartitionFileInStream{" +
+                "filePath='" + filePath + '\'' +
+                ", startPos=" + startPos +
+                ", length=" + length +
+                ", currentPos=" + currentPos +
+                '}';
+    }
 }

@@ -7,7 +7,7 @@ import org.apache.spark.shuffle.{BaseShuffleHandle, ShuffleWriter}
 import org.apache.spark.storage.{AlluxioIndexFile, AlluxioStore, PartitionIndex}
 import org.apache.spark.{SparkEnv, TaskContext}
 
-import scala.collection.mutable
+import scala.collection.JavaConversions.mapAsScalaMap
 import scala.collection.mutable.ArrayBuffer
 
 
@@ -51,7 +51,7 @@ private[spark] class AlluxioShuffleWriter[K, V](
 
     // TODO a task write the only one partition data to a file and mark offset in a index file
     // TODO maybe result in OOM
-    val cacheMap = new mutable.HashMap[Int, ArrayBuffer[Product2[Any, Any]]]
+    val cacheMap: scala.collection.mutable.Map[Int, ArrayBuffer[Product2[Any, Any]]] = new java.util.TreeMap[Int, ArrayBuffer[Product2[Any, Any]]]
     for (elem: Product2[Any, Any] <- iter) {
       val partitionId = dep.partitioner.getPartition(elem._1)
       val arrayBuffer = cacheMap.getOrElse(partitionId, new ArrayBuffer[Product2[Any, Any]])
@@ -70,7 +70,6 @@ private[spark] class AlluxioShuffleWriter[K, V](
       val length = dataWriter.writeRecords(v)
       indexFile.addIndex(new PartitionIndex(k, curLength, length - curLength))
       partitionLengths.append(length - curLength)
-      logInfo(s"partition $k length is ${length - curLength}")
       curLength = length
     }
     dataWriter.close()
