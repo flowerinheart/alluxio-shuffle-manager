@@ -54,8 +54,9 @@ private[spark] class AlluxioShuffleWriter[K, V](
     val cacheMap: scala.collection.mutable.Map[Int, ArrayBuffer[Product2[Any, Any]]] = new java.util.TreeMap[Int, ArrayBuffer[Product2[Any, Any]]]
     for (elem: Product2[Any, Any] <- iter) {
       val partitionId = dep.partitioner.getPartition(elem._1)
-      val arrayBuffer = cacheMap.getOrElse(partitionId, new ArrayBuffer[Product2[Any, Any]])
-      if (arrayBuffer.isEmpty) {
+      var arrayBuffer = cacheMap.getOrElse(partitionId, null)
+      if (arrayBuffer == null) {
+        arrayBuffer = new ArrayBuffer[Product2[Any, Any]]
         cacheMap(partitionId) = arrayBuffer
       }
       arrayBuffer.append(elem)

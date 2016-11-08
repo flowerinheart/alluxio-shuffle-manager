@@ -252,8 +252,9 @@ class AlluxioStore extends Logging {
               // read data and convert to map
               val indexFile = AlluxioIndexFile.newInstance(data)
               for (partitionIndex <- indexFile.getPartitionIndexes) {
-                val partitions = partitionIndexes.getOrElse(partitionIndex.partitionId, new ArrayBuffer[(String, PartitionIndex)])
-                if (partitions.isEmpty) {
+                var partitions = partitionIndexes.getOrElse(partitionIndex.partitionId, null)
+                if (partitions == null) {
+                  partitions = new ArrayBuffer[(String, PartitionIndex)]
                   partitionIndexes(partitionIndex.partitionId) = partitions
                 }
                 partitions.append((status.getPath.replace("index", "data"), partitionIndex))
