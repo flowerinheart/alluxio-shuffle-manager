@@ -5,17 +5,16 @@ import java.net.InetAddress
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
 
+import alluxio.client.file._
 import alluxio.client.file.options.{CreateDirectoryOptions, CreateFileOptions, DeleteOptions, OpenFileOptions}
-import alluxio.client.file.{FileOutStream, FileSystem, URIStatus}
 import alluxio.client.{ClientContext, ReadType, WriteType}
 import alluxio.{AlluxioURI, Configuration, PropertyKey}
-import org.apache.alluxio.api.streams.PartitionFileInStream
 import org.apache.spark.executor.ShuffleWriteMetrics
 import org.apache.spark.internal.Logging
 import org.apache.spark.serializer.{SerializationStream, Serializer, SerializerInstance}
 import org.apache.spark.{SparkConf, SparkEnv}
 
-import scala.collection.JavaConversions.asScalaBuffer
+import scala.collection.JavaConversions.{asScalaBuffer, bufferAsJavaList}
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
@@ -42,7 +41,9 @@ class AlluxioStore extends Logging {
   var alluxioReadWithoutCache: Boolean = false
 
   val shuffleIds = new mutable.HashSet[Int]
-  val partitionIndexes = new mutable.HashMap[Int, ArrayBuffer[(String, PartitionIndex)]]
+  // [shuffleId, [partitionId, ArrayBuffer[(filePath, PartitionIndex)]]]
+  val shufflePartitionIndexes = new mutable.HashMap[Int, mutable.HashMap[Int, ArrayBuffer[(String, PartitionIndex)]]]
+  val shuffleDataFilesStatus = new mutable.HashMap[Int, Map[String, URIStatus]]
 
   /**
     * init AlluxioStore
@@ -185,7 +186,7 @@ class AlluxioStore extends Logging {
   def getDataWriter(shuffleId: Int, mapId: Int, serializerInstance: SerializerInstance,
                 writeMetrics: ShuffleWriteMetrics): AlluxioObjectWriter = {
     val filePath = new StringBuilder().append(shuffleDir).append("/").append(appId).append("/shuffle_").append(shuffleId)
-      .append("/data/map_").append(mapId).append(".data").toString()
+      .append("/data/").append(executorId).append("_map_").append(mapId).append(".data").toString()
     val options: CreateFileOptions = CreateFileOptions.defaults()
       .setWriteType(if (alluxioMemOnly) WriteType.MUST_CACHE else WriteType.CACHE_THROUGH)
       .setBlockSizeBytes(alluxioBlockSize).setRecursive(true)
@@ -201,7 +202,7 @@ class AlluxioStore extends Logging {
     */
   def getIndexWriter(shuffleId: Int, mapId: Int): FileOutStream = {
     val filePath = new StringBuilder().append(shuffleDir).append("/").append(appId).append("/shuffle_").append(shuffleId)
-      .append("/index/map_").append(mapId).append(".index").toString()
+      .append("/index/").append(executorId).append("_map_").append(mapId).append(".index").toString()
     val options: CreateFileOptions = CreateFileOptions.defaults()
       .setWriteType(if (alluxioMemOnly) WriteType.MUST_CACHE else WriteType.CACHE_THROUGH)
       .setBlockSizeBytes(alluxioBlockSize).setRecursive(true)
@@ -213,23 +214,75 @@ class AlluxioStore extends Logging {
     * @param shuffleId shuffle id
     * @param startPrtId start partition id
     * @param endPartId end partition id
-    * @return an array of FileInStream
+    * @return an MultiBlockInStream
     */
-  def getFileInStreams(shuffleId: Int, startPrtId: Int, endPartId: Int): Array[PartitionFileInStream] = {
+  def getPartitionInStream(shuffleId: Int, startPrtId: Int, endPartId: Int): MultiBlockInStream = {
+    val start = System.nanoTime()
     val options = OpenFileOptions.defaults().setReadType(if (alluxioReadWithoutCache) ReadType.NO_CACHE else ReadType.CACHE_PROMOTE)
-    checkAndUpdatePartitionIndexes(shuffleId, options)
+    val partitionIndexes = getShufflePartitionIndexes(shuffleId, options)
+    val filesStatus = getFilesStatus(shuffleId)
 
-    logInfo(s"start partition is $startPrtId, end partition is $endPartId")
-    val streams = new ArrayBuffer[PartitionFileInStream]
+    val blocksArray = new ArrayBuffer[MultiBlockInfo]
     for (i <- startPrtId until endPartId) {
-      val partitionIndexArray = partitionIndexes(i)
-      for ((filePath, index) <- partitionIndexArray) {
-        streams.append(new PartitionFileInStream(fs, filePath, options, index.startPos, index.length))
-        //logInfo(s"$filePath start pos is ${index.startPos}, length is ${index.length}")
+      blocksArray.appendAll(genMultiBlockInfos(filesStatus, partitionIndexes(i)))
+    }
+    val end = System.nanoTime()
+    logInfo(s"get $startPrtId partition to ${endPartId - 1} partition stream total spent ${(end - start)/1000000} ms, block array size is ${blocksArray.size}")
+    fs.asInstanceOf[BaseFileSystem].openMultiBlock(blocksArray)
+  }
+
+  private def genMultiBlockInfos(filesStatus: Map[String, URIStatus],
+                                 partitionIndexes: ArrayBuffer[(String, PartitionIndex)]): Array[MultiBlockInfo] = {
+    val blockInfos = new ArrayBuffer[MultiBlockInfo]
+    for ((filePath, partitionIndex) <- partitionIndexes) {
+      val status = filesStatus(filePath)
+      val tmpBlockArray = computeBlockInfosFromPartitionIndex(partitionIndex, status)
+      if (tmpBlockArray.isEmpty) {
+        logError(s"get blocks from ${partitionIndex.partitionId} partition of $filePath file is empty")
+      } else {
+        blockInfos.appendAll(tmpBlockArray)
       }
     }
-    logInfo("get streams from alluxio size is " + streams.length)
-    streams.toArray
+    blockInfos.toArray
+  }
+
+  private def computeBlockInfosFromPartitionIndex(index: PartitionIndex, status: URIStatus): Array[MultiBlockInfo] = {
+    var length = index.length
+    var startPos = index.startPos
+    val meetBlocks = new ArrayBuffer[MultiBlockInfo]
+    for (block <- status.getFileBlockInfos) {
+      // whether startPos is in the range of current block
+      if (startPos >= block.getOffset && startPos <= block.getOffset + block.getBlockInfo.getLength) {
+        val workerAddress = block.getBlockInfo.getLocations.get(0).getWorkerAddress
+        if (startPos + length <= block.getOffset + block.getBlockInfo.getLength) {
+          // data end is in this block, the end pos is index.startPos + index.length, then return directly
+          meetBlocks.append(new MultiBlockInfo(workerAddress.getHost, workerAddress.getDataPort,
+            workerAddress.getRpcPort, block.getBlockInfo.getBlockId, startPos, startPos + length))
+          return meetBlocks.toArray
+        } else {
+          // data end is not in this block, the end pos is block.getOffset + block.getBlockInfo.getLength
+          meetBlocks.append(new MultiBlockInfo(workerAddress.getHost, workerAddress.getDataPort,
+            workerAddress.getRpcPort, block.getBlockInfo.getBlockId, startPos, block.getOffset + block.getBlockInfo.getLength))
+          startPos = block.getOffset + block.getBlockInfo.getLength
+          length = length - (block.getOffset + block.getBlockInfo.getLength - startPos)
+        }
+      }
+    }
+    meetBlocks.toArray
+  }
+
+  private def getFilesStatus(shuffleId: Int): Map[String, URIStatus] = {
+    if (!shuffleDataFilesStatus.contains(shuffleId)) {
+      synchronized {
+        if (!shuffleDataFilesStatus.contains(shuffleId)) {
+          val dataDir = new StringBuilder().append(shuffleDir).append("/").append(appId)
+            .append("/shuffle_").append(shuffleId).append("/data").toString()
+          val statusList: mutable.Buffer[URIStatus] = fs.listStatus(new AlluxioURI(dataDir))
+          shuffleDataFilesStatus(shuffleId) = statusList.map(status => (status.getPath, status)).toMap
+        }
+      }
+    }
+    shuffleDataFilesStatus(shuffleId)
   }
 
   /**
@@ -237,11 +290,12 @@ class AlluxioStore extends Logging {
     * @param shuffleId shuffle id
     * @param options open file options
     */
-  private def checkAndUpdatePartitionIndexes(shuffleId: Int, options: OpenFileOptions): Unit = {
-    if (partitionIndexes.isEmpty) {
+  private def getShufflePartitionIndexes(shuffleId: Int, options: OpenFileOptions): mutable.HashMap[Int, ArrayBuffer[(String, PartitionIndex)]] = {
+    if (!shufflePartitionIndexes.contains(shuffleId)) {
       synchronized {
-        if (partitionIndexes.isEmpty) {
-          // get all index files
+        if (!shufflePartitionIndexes.contains(shuffleId)) {
+          val partitionIndexMap = new mutable.HashMap[Int, ArrayBuffer[(String, PartitionIndex)]]
+          // get all index files TODO optimize
           val indexDir = new StringBuilder().append(shuffleDir).append("/").append(appId)
             .append("/shuffle_").append(shuffleId).append("/index").toString()
           val fileStatus: mutable.Buffer[URIStatus] = fs.listStatus(new AlluxioURI(indexDir))
@@ -252,20 +306,23 @@ class AlluxioStore extends Logging {
               // read data and convert to map
               val indexFile = AlluxioIndexFile.newInstance(data)
               for (partitionIndex <- indexFile.getPartitionIndexes) {
-                var partitions = partitionIndexes.getOrElse(partitionIndex.partitionId, null)
+                var partitions = partitionIndexMap.getOrElse(partitionIndex.partitionId, null)
                 if (partitions == null) {
                   partitions = new ArrayBuffer[(String, PartitionIndex)]
-                  partitionIndexes(partitionIndex.partitionId) = partitions
+                  partitionIndexMap(partitionIndex.partitionId) = partitions
                 }
                 partitions.append((status.getPath.replace("index", "data"), partitionIndex))
               }
+
             } else {
               logError(s"read ${status.getPath} file data return -1")
             }
           }
+          shufflePartitionIndexes(shuffleId) = partitionIndexMap
         }
       }
     }
+    shufflePartitionIndexes(shuffleId)
   }
 
   private def shuffleExists(shuffleId: Int): Boolean = {

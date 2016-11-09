@@ -2,6 +2,8 @@ package org.apache.spark.storage
 
 import java.nio.ByteBuffer
 
+import org.apache.spark.internal.Logging
+
 import scala.collection.mutable.ArrayBuffer
 
 /**
@@ -37,11 +39,12 @@ class AlluxioIndexFile{
   def getPartitionIndexes: ArrayBuffer[PartitionIndex] = indexes
 }
 
-object AlluxioIndexFile {
+object AlluxioIndexFile extends Logging {
   def newInstance(bytes: Array[Byte]): AlluxioIndexFile = {
     val byteBuffer = ByteBuffer.wrap(bytes)
     val indexes = new ArrayBuffer[PartitionIndex]
     val loop = bytes.length / 20
+    logInfo(s"loop is $loop")
     for (i <- 0 until loop) {
       indexes.append(new PartitionIndex(byteBuffer.getInt(), byteBuffer.getLong, byteBuffer.getLong()))
     }
