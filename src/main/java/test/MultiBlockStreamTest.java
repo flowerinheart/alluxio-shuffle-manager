@@ -38,10 +38,10 @@ public class MultiBlockStreamTest {
     private static void createFiles() throws IOException, AlluxioException {
         // 分别写文件名为/test/1~4 的大小为44KB的数据，其中每KB的数据依次是1 2 3 4
         for (int i = 1; i <= 4; i++) {
-            FileOutStream fos = fs.createFile(new AlluxioURI("/test"+i), CreateFileOptions.defaults().setRecursive(true).setBlockSizeBytes(1024));
-            ByteBuffer buffer = ByteBuffer.allocate(4096);
+            FileOutStream fos = fs.createFile(new AlluxioURI("/test"+i), CreateFileOptions.defaults().setRecursive(true).setBlockSizeBytes(1024*1024));
+            ByteBuffer buffer = ByteBuffer.allocate(4096*1024);
             for (int j = 1; j < 5; j++) {
-                for (int k = 0; k < 256; k++) {
+                for (int k = 0; k < 256*1024; k++) {
                     buffer.putInt(j);
                 }
             }
@@ -53,15 +53,15 @@ public class MultiBlockStreamTest {
 
     private static void readFiles() throws IOException, InterruptedException {
         List<MultiBlockInfo> list = new ArrayList<MultiBlockInfo>(4);
-        list.add(new MultiBlockInfo("gpnode1", 29999, 29998, 10793840017408L, 0, 1024));
-        list.add(new MultiBlockInfo("gpnode1", 29999, 29998, 10793856794625L, 0, 1024));
-        list.add(new MultiBlockInfo("gpnode1", 29999, 29998, 10793873571842L, 0, 1024));
-        list.add(new MultiBlockInfo("gpnode1", 29999, 29998, 10793890349059L, 0, 1024));
+        list.add(new MultiBlockInfo("gpmaster", 29999, 29998, 24947720192L, 0, 1024*1024));
+        list.add(new MultiBlockInfo("gpnode2", 29999, 29998, 24964497409L, 0, 1024*1024));
+        list.add(new MultiBlockInfo("gpnode2", 29999, 29998, 24981274626L, 0, 1024*1024));
+        list.add(new MultiBlockInfo("gpnode1", 29999, 29998, 24998051843L, 0, 1024*1024));
 
         MultiBlockInStream stream = ((BaseFileSystem) fs).openMultiBlock(list);
-        ByteBuffer buffer = ByteBuffer.allocate(4096);
-        stream.read(buffer.array(), 0, 1000);
-        stream.read(buffer.array(), 1000, 3096);
+        ByteBuffer buffer = ByteBuffer.allocate(4096*1024);
+        stream.read(buffer.array(), 0, 3096*1024);
+        stream.read(buffer.array(), 1000, 1000*1024);
         stream.close();
         //buffer.flip();
         StringBuilder sb = new StringBuilder();

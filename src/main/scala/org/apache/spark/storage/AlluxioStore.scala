@@ -39,6 +39,7 @@ class AlluxioStore extends Logging {
   var alluxioBlockSize: Long = 0
   var alluxioMemOnly: Boolean = false
   var alluxioReadWithoutCache: Boolean = false
+  var alluxioReadAllByRemoteReader: Boolean = false
 
   val shuffleIds = new mutable.HashSet[Int]
   // [shuffleId, [partitionId, ArrayBuffer[(filePath, PartitionIndex)]]]
@@ -55,9 +56,11 @@ class AlluxioStore extends Logging {
     alluxioBlockSize = sparkConf.getLong("spark.alluxio.block.size", 536870912)
     alluxioMemOnly = sparkConf.getBoolean("spark.alluxio.memory.only", defaultValue = true)
     alluxioReadWithoutCache = sparkConf.getBoolean("spark.alluxio.read.without.cache", defaultValue = true)
+    alluxioReadAllByRemoteReader = sparkConf.getBoolean("spark.alluxio.read.all.by.remote.reader", defaultValue = false)
     val alluxioRemoteReadBufferSize = sparkConf.get("spark.alluxio.remote.read.buffer.size", "1MB")
     val alluxioCachePartiallyReadBlock = sparkConf.getBoolean("spark.alluxio.cache.partially.read.block", defaultValue = false)
     val alluxioFileSeekBufferSize = sparkConf.get("spark.alluxio.file.seek.buffer.size", "1KB")
+    val alluxioFileBufferSize = sparkConf.get("spark.alluxio.file.buffer.bytes", "1MB")
     val alluxioMasterHost = sparkConf.get("spark.alluxio.master.host")
     if (alluxioMasterHost == null) {
       throw new Exception("get spark.alluxio.master.host return null")
@@ -68,6 +71,7 @@ class AlluxioStore extends Logging {
       Configuration.set(PropertyKey.USER_BLOCK_REMOTE_READ_BUFFER_SIZE_BYTES, alluxioRemoteReadBufferSize)
       Configuration.set(PropertyKey.USER_FILE_CACHE_PARTIALLY_READ_BLOCK, alluxioCachePartiallyReadBlock)
       Configuration.set(PropertyKey.USER_FILE_SEEK_BUFFER_SIZE_BYTES, alluxioFileSeekBufferSize)
+      Configuration.set(PropertyKey.USER_FILE_BUFFER_BYTES, alluxioFileBufferSize)
       ClientContext.init()
       fs = FileSystem.Factory.get()
     }
@@ -228,7 +232,7 @@ class AlluxioStore extends Logging {
     }
     val end = System.nanoTime()
     logInfo(s"get $startPrtId partition to ${endPartId - 1} partition stream total spent ${(end - start)/1000000} ms, block array size is ${blocksArray.size}")
-    fs.asInstanceOf[BaseFileSystem].openMultiBlock(blocksArray)
+    fs.asInstanceOf[BaseFileSystem].openMultiBlock(blocksArray, alluxioReadAllByRemoteReader)
   }
 
   private def genMultiBlockInfos(filesStatus: Map[String, URIStatus],

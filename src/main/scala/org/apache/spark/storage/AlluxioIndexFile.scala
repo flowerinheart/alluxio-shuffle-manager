@@ -44,7 +44,6 @@ object AlluxioIndexFile extends Logging {
     val byteBuffer = ByteBuffer.wrap(bytes)
     val indexes = new ArrayBuffer[PartitionIndex]
     val loop = bytes.length / 20
-    logInfo(s"loop is $loop")
     for (i <- 0 until loop) {
       indexes.append(new PartitionIndex(byteBuffer.getInt(), byteBuffer.getLong, byteBuffer.getLong()))
     }
