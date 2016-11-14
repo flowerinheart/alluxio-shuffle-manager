@@ -53,13 +53,10 @@ class AlluxioStore extends Logging {
     logInfo("begin to init Alluxio Store.")
 
     // init alluxio filesystem client
-    alluxioBlockSize = sparkConf.getLong("spark.alluxio.block.size", 536870912)
+    alluxioBlockSize = sparkConf.getLong("spark.alluxio.block.size", 512)*1024*1024
     alluxioMemOnly = sparkConf.getBoolean("spark.alluxio.memory.only", defaultValue = true)
     alluxioReadWithoutCache = sparkConf.getBoolean("spark.alluxio.read.without.cache", defaultValue = true)
     alluxioReadAllByRemoteReader = sparkConf.getBoolean("spark.alluxio.read.all.by.remote.reader", defaultValue = false)
-    val alluxioRemoteReadBufferSize = sparkConf.get("spark.alluxio.remote.read.buffer.size", "1MB")
-    val alluxioCachePartiallyReadBlock = sparkConf.getBoolean("spark.alluxio.cache.partially.read.block", defaultValue = false)
-    val alluxioFileSeekBufferSize = sparkConf.get("spark.alluxio.file.seek.buffer.size", "1KB")
     val alluxioFileBufferSize = sparkConf.get("spark.alluxio.file.buffer.bytes", "1MB")
     val alluxioMasterHost = sparkConf.get("spark.alluxio.master.host")
     if (alluxioMasterHost == null) {
@@ -68,9 +65,6 @@ class AlluxioStore extends Logging {
       val masterLocation: AlluxioURI = new AlluxioURI(alluxioMasterHost)
       Configuration.set(PropertyKey.MASTER_HOSTNAME, masterLocation.getHost)
       Configuration.set(PropertyKey.MASTER_RPC_PORT, Integer.toString(masterLocation.getPort))
-      Configuration.set(PropertyKey.USER_BLOCK_REMOTE_READ_BUFFER_SIZE_BYTES, alluxioRemoteReadBufferSize)
-      Configuration.set(PropertyKey.USER_FILE_CACHE_PARTIALLY_READ_BLOCK, alluxioCachePartiallyReadBlock)
-      Configuration.set(PropertyKey.USER_FILE_SEEK_BUFFER_SIZE_BYTES, alluxioFileSeekBufferSize)
       Configuration.set(PropertyKey.USER_FILE_BUFFER_BYTES, alluxioFileBufferSize)
       ClientContext.init()
       fs = FileSystem.Factory.get()
@@ -80,8 +74,8 @@ class AlluxioStore extends Logging {
     logInfo(s"alluxio block size is $alluxioBlockSize")
     logInfo(s"alluxio use memory only flag is $alluxioMemOnly")
     logInfo(s"alluxio read without cache flag is $alluxioReadWithoutCache")
-    logInfo(s"alluxio remote read buffer size is $alluxioRemoteReadBufferSize")
-    logInfo(s"alluxio cache partially read block is $alluxioCachePartiallyReadBlock")
+    logInfo(s"alluxio file buffer size is $alluxioFileBufferSize")
+    logInfo(s"alluxio read all data by remote reader flag is $alluxioReadAllByRemoteReader")
 
     if (executorId.equals("driver")) {
       // driver executor create root dir
