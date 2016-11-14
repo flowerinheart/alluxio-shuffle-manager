@@ -51,7 +51,6 @@ private[spark] class AlluxioShuffleManager(conf : SparkConf) extends ShuffleMana
     * Called on executors by reduce tasks.
     */
   override def getReader[K, C](handle: ShuffleHandle, startPartition: Int, endPartition: Int, context: TaskContext): ShuffleReader[K, C] = {
-    AlluxioStore.get.releaseShuffleWriterGroup(handle.shuffleId)
     new AlluxioShuffleReader[K, C](handle.asInstanceOf[BaseShuffleHandle[K, _, C]], startPartition, endPartition, context)
   }
 

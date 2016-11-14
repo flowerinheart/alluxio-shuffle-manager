@@ -5,8 +5,8 @@ import java.net.InetAddress
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
 
+import alluxio.client.file._
 import alluxio.client.file.options.{CreateDirectoryOptions, CreateFileOptions, DeleteOptions, OpenFileOptions}
-import alluxio.client.file.{FileInStream, FileOutStream, FileSystem}
 import alluxio.client.{ClientContext, ReadType, WriteType}
 import alluxio.{AlluxioURI, Configuration, PropertyKey}
 import org.apache.spark.executor.ShuffleWriteMetrics
@@ -14,6 +14,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.serializer.{SerializationStream, Serializer, SerializerInstance}
 import org.apache.spark.{SparkConf, SparkEnv}
 
+import scala.collection.JavaConversions.{asScalaBuffer, bufferAsJavaList}
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
@@ -38,11 +39,12 @@ class AlluxioStore extends Logging {
   var alluxioBlockSize: Long = 0
   var alluxioMemOnly: Boolean = false
   var alluxioReadWithoutCache: Boolean = false
+  var alluxioReadAllByRemoteReader: Boolean = false
 
-  // key : shuffleId, value : fileId
-  val shuffleWriterGroups = new mutable.HashMap[Int, AlluxioShuffleWriterGroup]
-  val unregLock = new Object()
-  val getWritersLock = new Object()
+  val shuffleIds = new mutable.HashSet[Int]
+  // [shuffleId, [partitionId, ArrayBuffer[(filePath, PartitionIndex)]]]
+  val shufflePartitionIndexes = new mutable.HashMap[Int, mutable.HashMap[Int, ArrayBuffer[(String, PartitionIndex)]]]
+  val shuffleDataFilesStatus = new mutable.HashMap[Int, Map[String, URIStatus]]
 
   /**
     * init AlluxioStore
@@ -51,9 +53,11 @@ class AlluxioStore extends Logging {
     logInfo("begin to init Alluxio Store.")
 
     // init alluxio filesystem client
-    alluxioBlockSize = sparkConf.getLong("spark.alluxio.block.size", 536870912)
+    alluxioBlockSize = sparkConf.getLong("spark.alluxio.block.size", 512)*1024*1024
     alluxioMemOnly = sparkConf.getBoolean("spark.alluxio.memory.only", defaultValue = true)
     alluxioReadWithoutCache = sparkConf.getBoolean("spark.alluxio.read.without.cache", defaultValue = true)
+    alluxioReadAllByRemoteReader = sparkConf.getBoolean("spark.alluxio.read.all.by.remote.reader", defaultValue = false)
+    val alluxioFileBufferSize = sparkConf.get("spark.alluxio.file.buffer.bytes", "1MB")
     val alluxioMasterHost = sparkConf.get("spark.alluxio.master.host")
     if (alluxioMasterHost == null) {
       throw new Exception("get spark.alluxio.master.host return null")
@@ -61,6 +65,7 @@ class AlluxioStore extends Logging {
       val masterLocation: AlluxioURI = new AlluxioURI(alluxioMasterHost)
       Configuration.set(PropertyKey.MASTER_HOSTNAME, masterLocation.getHost)
       Configuration.set(PropertyKey.MASTER_RPC_PORT, Integer.toString(masterLocation.getPort))
+      Configuration.set(PropertyKey.USER_FILE_BUFFER_BYTES, alluxioFileBufferSize)
       ClientContext.init()
       fs = FileSystem.Factory.get()
     }
@@ -69,6 +74,8 @@ class AlluxioStore extends Logging {
     logInfo(s"alluxio block size is $alluxioBlockSize")
     logInfo(s"alluxio use memory only flag is $alluxioMemOnly")
     logInfo(s"alluxio read without cache flag is $alluxioReadWithoutCache")
+    logInfo(s"alluxio file buffer size is $alluxioFileBufferSize")
+    logInfo(s"alluxio read all data by remote reader flag is $alluxioReadAllByRemoteReader")
 
     if (executorId.equals("driver")) {
       // driver executor create root dir
@@ -110,13 +117,13 @@ class AlluxioStore extends Logging {
     if (shuffleExists(shuffleId)) {
       logInfo(s"shuffle id is : $shuffleId, this shuffle has registered")
     } else {
-      val shuffleIdDir = shuffleDir + "/" + appId + "/shuffle_" + shuffleId
+      val shuffleDataDir = new StringBuilder().append(shuffleDir).append("/").append(appId)
+        .append("/shuffle_").append(shuffleId).append("/data").toString()
+      val shuffleIndexDir = new StringBuilder().append(shuffleDir).append("/").append(appId)
+        .append("/shuffle_").append(shuffleId).append("/index").toString()
       val options: CreateDirectoryOptions = CreateDirectoryOptions.defaults().setAllowExists(true).setRecursive(true)
-      for (i <- 0 until partitions) {
-        val partDir = shuffleIdDir + "/part_" + i
-        fs.createDirectory(new AlluxioURI(partDir), options)
-        logInfo(s"create $partDir successful on Alluxio.")
-      }
+      fs.createDirectory(new AlluxioURI(shuffleDataDir), options)
+      fs.createDirectory(new AlluxioURI(shuffleIndexDir), options)
       logInfo(s"register shuffle over, shuffle id is $shuffleId .")
     }
   }
@@ -131,7 +138,7 @@ class AlluxioStore extends Logging {
       if (shuffleId > 0 && shuffleExists(shuffleId)) {
         // when shuffle id is exist, delete shuffle id dir from alluxio
         deleteAlluxioFiles(shuffleId)
-        shuffleWriterGroups -= shuffleId
+        shuffleIds -= shuffleId
       }
     } catch {
       case e: Exception => logInfo(s"failed to unregister shuffle, shuffle id is $shuffleId")
@@ -143,19 +150,11 @@ class AlluxioStore extends Logging {
     * direct delete the application directory from Alluxio
     */
   def releaseAllShuffleData(): Unit = {
-    for (key <- shuffleWriterGroups.keySet) {
-      deleteAlluxioFiles(key)
-      shuffleWriterGroups -= key
+    for (shuffleId <- shuffleIds) {
+      deleteAlluxioFiles(shuffleId)
+      shuffleIds -= shuffleId
     }
     fs.delete(new AlluxioURI(shuffleDir + "/" + appId), DeleteOptions.defaults().setRecursive(true))
-  }
-
-  /**
-    * release the shuffle writer group
-    * @param shuffleId shuffle id
-    */
-  def releaseShuffleWriterGroup(shuffleId: Int): Unit = {
-    shuffleWriterGroups(shuffleId).release()
   }
 
   /**
@@ -166,7 +165,7 @@ class AlluxioStore extends Logging {
     val options: DeleteOptions = DeleteOptions.defaults().setRecursive(true)
     val shuffleIdDir = new AlluxioURI(shuffleDir + "/" + appId + "/shuffle_" + shuffleId)
     // ensure thread safe
-    unregLock.synchronized {
+    synchronized {
       if (fs.exists(shuffleIdDir)) {
         fs.delete(shuffleIdDir, options)
       }
@@ -175,36 +174,37 @@ class AlluxioStore extends Logging {
   }
 
   /**
-    * get shuffle writer group, this method would create files on Alluxio and get FileOutStreams
+    * get data file writer
     * @param shuffleId shuffle id
-    * @param numPartitions number of partitions
-    * @param serializerInstance serializer instance, serialize record's key and value
-    * @param writeMetrics shuffle write metrics, statistic records number have been written
-    * @return return an AlluxioShuffleWriterGroup object
+    * @param mapId map task id
+    * @param serializerInstance serializer instance
+    * @param writeMetrics metrics
+    * @return AlluxioObjectWriter object
     */
-  def getWriterGroup(shuffleId: Int, numPartitions: Int,
-                     serializerInstance: SerializerInstance,
-                     writeMetrics: ShuffleWriteMetrics): AlluxioShuffleWriterGroup = {
-    if (!shuffleWriterGroups.contains(shuffleId)) {
-      getWritersLock.synchronized {
-        if (!shuffleWriterGroups.contains(shuffleId)) {
-          // every shuffle dependency corresponds to one writer group, and one writer corresponds to one partition
-          val streams = new Array[FileOutStream](numPartitions)
-          for (i <- 0 until numPartitions) {
-            val sb: StringBuilder = new StringBuilder()
-            sb.append(shuffleDir).append("/").append(appId).append("/shuffle_").append(shuffleId).append("/part_").append(i)
-              .append("/").append(executorId).append("_").append(hostname)
-            val options: CreateFileOptions = CreateFileOptions.defaults()
-              .setWriteType(if (alluxioMemOnly) WriteType.MUST_CACHE else WriteType.CACHE_THROUGH)
-              .setBlockSizeBytes(alluxioBlockSize).setRecursive(true)
-            streams(i) = fs.createFile(new AlluxioURI(sb.toString()), options)
-          }
-          shuffleWriterGroups.put(shuffleId, new AlluxioShuffleWriterGroup(streams, shuffleId, serializerInstance, writeMetrics))
-        }
-      }
-    }
+  def getDataWriter(shuffleId: Int, mapId: Int, serializerInstance: SerializerInstance,
+                writeMetrics: ShuffleWriteMetrics): AlluxioObjectWriter = {
+    val filePath = new StringBuilder().append(shuffleDir).append("/").append(appId).append("/shuffle_").append(shuffleId)
+      .append("/data/").append(executorId).append("_map_").append(mapId).append(".data").toString()
+    val options: CreateFileOptions = CreateFileOptions.defaults()
+      .setWriteType(if (alluxioMemOnly) WriteType.MUST_CACHE else WriteType.CACHE_THROUGH)
+      .setBlockSizeBytes(alluxioBlockSize).setRecursive(true)
+    val fos = fs.createFile(new AlluxioURI(filePath), options)
+    new AlluxioObjectWriter(fos, serializerInstance,writeMetrics, shuffleId, mapId)
+  }
 
-    shuffleWriterGroups(shuffleId)
+  /**
+    * get index file writer
+    * @param shuffleId shuffle id
+    * @param mapId map task id
+    * @return FileOutStream object
+    */
+  def getIndexWriter(shuffleId: Int, mapId: Int): FileOutStream = {
+    val filePath = new StringBuilder().append(shuffleDir).append("/").append(appId).append("/shuffle_").append(shuffleId)
+      .append("/index/").append(executorId).append("_map_").append(mapId).append(".index").toString()
+    val options: CreateFileOptions = CreateFileOptions.defaults()
+      .setWriteType(if (alluxioMemOnly) WriteType.MUST_CACHE else WriteType.CACHE_THROUGH)
+      .setBlockSizeBytes(alluxioBlockSize).setRecursive(true)
+    fs.createFile(new AlluxioURI(filePath), options)
   }
 
   /**
@@ -212,54 +212,119 @@ class AlluxioStore extends Logging {
     * @param shuffleId shuffle id
     * @param startPrtId start partition id
     * @param endPartId end partition id
-    * @return an array of FileInStream
+    * @return an MultiBlockInStream
     */
-  def getFileInStreams(shuffleId: Int, startPrtId: Int, endPartId: Int): Array[FileInStream] = {
-    logInfo(s"start partition is $startPrtId, end partition is $endPartId")
+  def getPartitionInStream(shuffleId: Int, startPrtId: Int, endPartId: Int): MultiBlockInStream = {
+    val start = System.nanoTime()
     val options = OpenFileOptions.defaults().setReadType(if (alluxioReadWithoutCache) ReadType.NO_CACHE else ReadType.CACHE_PROMOTE)
-    val streams = ArrayBuffer.empty[FileInStream]
+    val partitionIndexes = getShufflePartitionIndexes(shuffleId, options)
+    val filesStatus = getFilesStatus(shuffleId)
+
+    val blocksArray = new ArrayBuffer[MultiBlockInfo]
     for (i <- startPrtId until endPartId) {
-      // to make sure thread safe, every executor only read the files which id equals its executor id
-      val sb: StringBuilder = new StringBuilder()
-      sb.append(shuffleDir).append("/").append(appId).append("/shuffle_").append(shuffleId).append("/part_").append(i).append("/")
-      val fileStatus = fs.listStatus(new AlluxioURI(sb.toString()))
-      val iter = fileStatus.iterator()
-      while (iter.hasNext) {
-        val status = iter.next()
-        val fileUri = new AlluxioURI(status.getPath)
-        if (checkFileStatus(status.getLength, fileUri)) {
-          streams.append(fs.openFile(fileUri, options))
+      blocksArray.appendAll(genMultiBlockInfos(filesStatus, partitionIndexes(i)))
+    }
+    val end = System.nanoTime()
+    logInfo(s"get $startPrtId partition to ${endPartId - 1} partition stream total spent ${(end - start)/1000000} ms, block array size is ${blocksArray.size}")
+    fs.asInstanceOf[BaseFileSystem].openMultiBlock(blocksArray, alluxioReadAllByRemoteReader)
+  }
+
+  private def genMultiBlockInfos(filesStatus: Map[String, URIStatus],
+                                 partitionIndexes: ArrayBuffer[(String, PartitionIndex)]): Array[MultiBlockInfo] = {
+    val blockInfos = new ArrayBuffer[MultiBlockInfo]
+    for ((filePath, partitionIndex) <- partitionIndexes) {
+      val status = filesStatus(filePath)
+      val tmpBlockArray = computeBlockInfosFromPartitionIndex(partitionIndex, status)
+      if (tmpBlockArray.isEmpty) {
+        logError(s"get blocks from ${partitionIndex.partitionId} partition of $filePath file is empty")
+      } else {
+        blockInfos.appendAll(tmpBlockArray)
+      }
+    }
+    blockInfos.toArray
+  }
+
+  private def computeBlockInfosFromPartitionIndex(index: PartitionIndex, status: URIStatus): Array[MultiBlockInfo] = {
+    var length = index.length
+    var startPos = index.startPos
+    val meetBlocks = new ArrayBuffer[MultiBlockInfo]
+    for (block <- status.getFileBlockInfos) {
+      // whether startPos is in the range of current block
+      if (startPos >= block.getOffset && startPos <= block.getOffset + block.getBlockInfo.getLength) {
+        val workerAddress = block.getBlockInfo.getLocations.get(0).getWorkerAddress
+        if (startPos + length <= block.getOffset + block.getBlockInfo.getLength) {
+          // data end is in this block, the end pos is index.startPos + index.length, then return directly
+          meetBlocks.append(new MultiBlockInfo(workerAddress.getHost, workerAddress.getDataPort,
+            workerAddress.getRpcPort, block.getBlockInfo.getBlockId, startPos, startPos + length))
+          return meetBlocks.toArray
+        } else {
+          // data end is not in this block, the end pos is block.getOffset + block.getBlockInfo.getLength
+          meetBlocks.append(new MultiBlockInfo(workerAddress.getHost, workerAddress.getDataPort,
+            workerAddress.getRpcPort, block.getBlockInfo.getBlockId, startPos, block.getOffset + block.getBlockInfo.getLength))
+          startPos = block.getOffset + block.getBlockInfo.getLength
+          length = length - (block.getOffset + block.getBlockInfo.getLength - startPos)
         }
       }
     }
-    logInfo("get streams from alluxio size is " + streams.length)
-    streams.toArray
+    meetBlocks.toArray
+  }
+
+  private def getFilesStatus(shuffleId: Int): Map[String, URIStatus] = {
+    if (!shuffleDataFilesStatus.contains(shuffleId)) {
+      synchronized {
+        if (!shuffleDataFilesStatus.contains(shuffleId)) {
+          val dataDir = new StringBuilder().append(shuffleDir).append("/").append(appId)
+            .append("/shuffle_").append(shuffleId).append("/data").toString()
+          val statusList: mutable.Buffer[URIStatus] = fs.listStatus(new AlluxioURI(dataDir))
+          shuffleDataFilesStatus(shuffleId) = statusList.map(status => (status.getPath, status)).toMap
+        }
+      }
+    }
+    shuffleDataFilesStatus(shuffleId)
   }
 
   /**
-    * check whether the file is closed by judging the length of the file
-    * @param length the file length
-    * @param fileUri Alluxio uri
-    * @return return true if the file is closed, otherwise false
+    * check and update partition indexes
+    * @param shuffleId shuffle id
+    * @param options open file options
     */
-  private def checkFileStatus(length: Long, fileUri: AlluxioURI): Boolean = {
-    if (length == 0) {
-      for (i <- 0 to 5) {
-        logWarning(s"${fileUri.getPath} length is 0, maybe hasn't been close, wait 100ms")
-        Thread.sleep(100)
-        val status = fs.getStatus(fileUri)
-        if (status.getLength != 0) {
-          return true
+  private def getShufflePartitionIndexes(shuffleId: Int, options: OpenFileOptions): mutable.HashMap[Int, ArrayBuffer[(String, PartitionIndex)]] = {
+    if (!shufflePartitionIndexes.contains(shuffleId)) {
+      synchronized {
+        if (!shufflePartitionIndexes.contains(shuffleId)) {
+          val partitionIndexMap = new mutable.HashMap[Int, ArrayBuffer[(String, PartitionIndex)]]
+          // get all index files TODO optimize
+          val indexDir = new StringBuilder().append(shuffleDir).append("/").append(appId)
+            .append("/shuffle_").append(shuffleId).append("/index").toString()
+          val fileStatus: mutable.Buffer[URIStatus] = fs.listStatus(new AlluxioURI(indexDir))
+          for (status <- fileStatus) {
+            val fis = fs.openFile(new AlluxioURI(status.getPath), options)
+            val data = new Array[Byte](status.getLength.asInstanceOf[Int])
+            if (fis.read(data) != -1) {
+              // read data and convert to map
+              val indexFile = AlluxioIndexFile.newInstance(data)
+              for (partitionIndex <- indexFile.getPartitionIndexes) {
+                var partitions = partitionIndexMap.getOrElse(partitionIndex.partitionId, null)
+                if (partitions == null) {
+                  partitions = new ArrayBuffer[(String, PartitionIndex)]
+                  partitionIndexMap(partitionIndex.partitionId) = partitions
+                }
+                partitions.append((status.getPath.replace("index", "data"), partitionIndex))
+              }
+
+            } else {
+              logError(s"read ${status.getPath} file data return -1")
+            }
+          }
+          shufflePartitionIndexes(shuffleId) = partitionIndexMap
         }
       }
-      false
-    } else {
-      true
     }
+    shufflePartitionIndexes(shuffleId)
   }
 
   private def shuffleExists(shuffleId: Int): Boolean = {
-    shuffleWriterGroups.contains(shuffleId)
+    shuffleIds.contains(shuffleId)
   }
 }
 
@@ -328,7 +393,6 @@ private[spark] class AlluxioObjectWriter(directStream: FileOutStream, serializer
   private var ts: TimeTrackingOutputStream = _
   private var finalPosition: Long = -1
   private var reportedPosition: Long = 0
-  private val lock = new Object()
 
   /**
     * Keep track of number of records written and also use this to periodically
@@ -388,20 +452,27 @@ private[spark] class AlluxioObjectWriter(directStream: FileOutStream, serializer
     ts.write(b, off, len)
   }
 
+  def writeRecords(arrayBuffer: ArrayBuffer[Product2[Any, Any]]): Long = {
+    for (elem <- arrayBuffer) {
+      write(elem._1, elem._2)
+    }
+    // ensure return the right length
+    flush()
+    length
+  }
+
   /**
     * write record's key and value with the serialized stream and write record num simultaneously
     * @param key record's key
     * @param value record's value
     */
   def write(key: Any, value: Any): Unit = {
-    lock.synchronized {
-      if (!initialized) {
-        open()
-      }
-
-      directObjOut.writeKey(key)
-      directObjOut.writeValue(value)
+    if (!initialized) {
+      open()
     }
+
+    directObjOut.writeKey(key)
+    directObjOut.writeValue(value)
     recordWritten()
   }
 
@@ -434,38 +505,6 @@ private[spark] class AlluxioObjectWriter(directStream: FileOutStream, serializer
     }
   }
 }
-
-class AlluxioShuffleWriterGroup(val streams: Array[FileOutStream], shuffleId: Int,
-                                serializerInstance: SerializerInstance,
-                                writeMetrics: ShuffleWriteMetrics,
-                                @volatile var isReleased: Boolean = false) extends Logging{
-  private val writers: Array[AlluxioObjectWriter] = new Array[AlluxioObjectWriter](streams.length)
-  private val releaseLock = new Object()
-
-  logInfo(s"shuffle id is : $shuffleId, writer num is : " + writers.length)
-  // init writers
-  for (i <- streams.indices) {
-    writers(i) = new AlluxioObjectWriter(streams(i), serializerInstance, writeMetrics, shuffleId, i)
-  }
-
-  def lengths(): Array[Long] = {
-      writers.map{ writer => writer.length}
-  }
-
-  def release(): Unit = {
-    if (!isReleased) {
-      releaseLock.synchronized {
-        if (!isReleased) {
-          isReleased = true
-          writers.foreach{ writer => writer.close()}
-        }
-      }
-    }
-  }
-
-  def getWriters: Array[AlluxioObjectWriter] = writers
-}
-
 
 
 

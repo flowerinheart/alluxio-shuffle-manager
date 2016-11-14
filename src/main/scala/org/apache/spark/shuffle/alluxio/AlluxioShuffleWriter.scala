@@ -4,8 +4,11 @@ package org.apache.spark.shuffle.alluxio
 import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.shuffle.{BaseShuffleHandle, ShuffleWriter}
-import org.apache.spark.storage.AlluxioStore
+import org.apache.spark.storage.{AlluxioIndexFile, AlluxioStore, PartitionIndex}
 import org.apache.spark.{SparkEnv, TaskContext}
+
+import scala.collection.JavaConversions.mapAsScalaMap
+import scala.collection.mutable.ArrayBuffer
 
 
 /**
@@ -28,7 +31,7 @@ private[spark] class AlluxioShuffleWriter[K, V](
   // we don't try deleting files, etc twice.
   private var stopping = false
   private val writeMetrics = context.taskMetrics().shuffleWriteMetrics
-  private val writerGroup = AlluxioStore.get.getWriterGroup(dep.shuffleId, dep.partitioner.numPartitions, dep.serializer.newInstance(), writeMetrics)
+  private val partitionLengths = new ArrayBuffer[Long]
 
   /** Write a sequence of records to this task's output */
   override def write(records: Iterator[Product2[K, V]]): Unit = {
@@ -46,9 +49,33 @@ private[spark] class AlluxioShuffleWriter[K, V](
       records
     }
 
-    for (elem <- iter) {
-      writerGroup.getWriters(dep.partitioner.getPartition(elem._1)).write(elem._1, elem._2)
+    // TODO a task write the only one partition data to a file and mark offset in a index file
+    // TODO maybe result in OOM
+    val cacheMap: scala.collection.mutable.Map[Int, ArrayBuffer[Product2[Any, Any]]] = new java.util.TreeMap[Int, ArrayBuffer[Product2[Any, Any]]]
+    for (elem: Product2[Any, Any] <- iter) {
+      val partitionId = dep.partitioner.getPartition(elem._1)
+      var arrayBuffer = cacheMap.getOrElse(partitionId, null)
+      if (arrayBuffer == null) {
+        arrayBuffer = new ArrayBuffer[Product2[Any, Any]]
+        cacheMap(partitionId) = arrayBuffer
+      }
+      arrayBuffer.append(elem)
     }
+
+    // write data and index file, then close all streams
+    val dataWriter = AlluxioStore.get.getDataWriter(dep.shuffleId, mapId, dep.serializer.newInstance(), writeMetrics)
+    val indexWriter = AlluxioStore.get.getIndexWriter(dep.shuffleId, mapId)
+    val indexFile = new AlluxioIndexFile
+    var curLength: Long = 0
+    for ((k, v) <- cacheMap) {
+      val length = dataWriter.writeRecords(v)
+      indexFile.addIndex(new PartitionIndex(k, curLength, length - curLength))
+      partitionLengths.append(length - curLength)
+      curLength = length
+    }
+    dataWriter.close()
+    indexWriter.write(indexFile.getBytes)
+    indexWriter.close()
   }
 
   /** Close this writer, passing along whether the map completed */
@@ -56,8 +83,7 @@ private[spark] class AlluxioShuffleWriter[K, V](
     if (!stopping) {
       stopping = true
       if (success) {
-        val sizes: Array[Long] = writerGroup.lengths()
-        return Some(MapStatus(blockManager.shuffleServerId, sizes))
+        return Some(MapStatus(blockManager.shuffleServerId, partitionLengths.toArray))
       }
     }
     None

@@ -3,7 +3,7 @@ package org.apache.spark.shuffle.alluxio
 import org.apache.spark.internal.Logging
 import org.apache.spark.serializer.SerializerManager
 import org.apache.spark.shuffle.{BaseShuffleHandle, ShuffleReader}
-import org.apache.spark.storage.{AlluxioStore, BlockManager}
+import org.apache.spark.storage.{AlluxioFileFetcherStream, AlluxioStore, BlockManager}
 import org.apache.spark.util.CompletionIterator
 import org.apache.spark.util.collection.ExternalSorter
 import org.apache.spark.{InterruptibleIterator, MapOutputTracker, SparkEnv, TaskContext}
@@ -25,25 +25,23 @@ private[spark] class AlluxioShuffleReader[K, C](
   extends ShuffleReader[K, C] with Logging{
 
   private val dep = handle.dependency
+  var stream: AlluxioFileFetcherStream = _
+  var count: Long = 0
 
   override def read(): Iterator[Product2[K, C]] = {
-    val streams = AlluxioStore.get.getFileInStreams(dep.shuffleId, startPartition, endPartition)
+    context.addTaskCompletionListener(_ => cleanUp())
+
+    stream = new AlluxioFileFetcherStream(AlluxioStore.get.getPartitionInStream(dep.shuffleId, startPartition, endPartition))
     val serializerInstance = dep.serializer.newInstance()
     // Create a key/value iterator for each stream
-    val recordIter = streams.iterator.flatMap {stream =>
-      // Note: the asKeyValueIterator below wraps a key/value iterator inside of a
-      // NextIterator. The NextIterator makes sure that close() is called on the
-      // underlying InputStream when all records have been read.
-
-      //serializerInstance.deserializeAlluxioStream(stream).asKeyValueIterator
-      serializerInstance.deserializeStream(stream).asKeyValueIterator
-    }
+    val recordIter = serializerInstance.deserializeStream(stream).asKeyValueIterator
 
     // Update the context task metrics for each record read.
     val readMetrics = context.taskMetrics.createTempShuffleReadMetrics()
     val metricIter = CompletionIterator[(Any, Any), Iterator[(Any, Any)]](
       recordIter.map { record =>
         readMetrics.incRecordsRead(1)
+        count += 1
         record
       }, context.taskMetrics().mergeShuffleReadMetrics())
 
@@ -82,5 +80,10 @@ private[spark] class AlluxioShuffleReader[K, C](
       case None =>
         aggregatedIter
     }
+  }
+
+  private def cleanUp(): Unit = {
+    logInfo(s"read from Alluxio file fetcher stream, total bytes  is ${stream.getTotalReadBytes}, count is $count")
+    stream.close()
   }
 }
